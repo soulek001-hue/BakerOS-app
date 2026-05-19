@@ -17,16 +17,16 @@ export default async function handler(req, res) {
   const { slug } = req.query;
   if (!slug) return res.status(400).json({ error: 'Missing slug' });
 
-  // Try exact username match first (indexed — fast)
-  let { data, error } = await supabaseAdmin
+  // Try exact bakery_username match first (indexed — fast)
+  let { data } = await supabaseAdmin
     .from('baker_data')
     .select('payload')
     .eq('bakery_username', slug)
     .single();
 
-  // Fall back to store name slug match (also indexed)
+  // Fall back to store_name_slug match (also indexed)
   if (!data) {
-    ({ data, error } = await supabaseAdmin
+    ({ data } = await supabaseAdmin
       .from('baker_data')
       .select('payload')
       .eq('store_name_slug', slug)
