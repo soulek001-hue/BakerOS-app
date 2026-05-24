@@ -1,9 +1,8 @@
 // api/notify.js — BakerOS SMS notification endpoint
-// Architecture:
-//   type "order"          → SMS to baker (looked up server-side from Supabase)
-//   type "message"        → SMS to baker (bakerPhone passed from public storefront)
-//   type "campaign"       → SMS to individual opted-in customer
-//   type "customer_message" → SMS to customer (decline/cancel/refund)
+// type "order"            → SMS to baker (looked up server-side from baker_settings)
+// type "message"          → SMS to baker (bakerPhone passed from public storefront)
+// type "campaign"         → SMS to individual opted-in customer
+// type "customer_message" → SMS to customer (decline/cancel/refund)
 
 import { createClient } from '@supabase/supabase-js';
 
@@ -81,24 +80,22 @@ export default async function handler(req, res) {
   }
 
   try {
-    // ── Type: order or message → notify baker ─────────────────────────────
+    // ── Baker notification (order or storefront message) ──────────────────
     if (type === 'order' || type === 'message') {
       let bakerTo = null;
 
-      // Look up baker phone server-side from Supabase (more secure than client-sent phone)
+      // Look up baker phone from baker_settings (more secure than client-sent)
       if (bakerId) {
         const { data } = await supabaseAdmin
-          .from('baker_data')
-          .select('payload')
+          .from('baker_settings')
+          .select('baker_info')
           .eq('user_id', bakerId)
           .single();
-        bakerTo = formatPhone(data?.payload?.bakerInfo?.phone);
+        bakerTo = formatPhone(data?.baker_info?.phone);
       }
 
-      // Fall back to env var (for storefront messages where bakerId isn't available)
       if (!bakerTo && bakerPhone) bakerTo = formatPhone(bakerPhone);
       if (!bakerTo) bakerTo = process.env.TWILIO_TO_NUMBER;
-
       if (!bakerTo) return res.status(400).json({ error: 'No baker phone configured' });
 
       const message = type === 'message'
@@ -109,21 +106,20 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true });
     }
 
-    // ── Type: campaign → SMS to opted-in customer ─────────────────────────
+    // ── Campaign SMS to opted-in customer ────────────────────────────────
     if (type === 'campaign') {
-      if (!phone || !customMessage) return res.status(400).json({ error: 'Phone and message required for campaign' });
+      if (!phone || !customMessage) return res.status(400).json({ error: 'Phone and message required' });
       const to = formatPhone(phone);
       if (!to) return res.status(400).json({ error: 'Invalid customer phone' });
       await sendSMS(from, to, customMessage, accountSid, authToken);
       return res.status(200).json({ success: true });
     }
 
-    // ── Type: customer_message → SMS to customer (decline/cancel/refund) ──
+    // ── Customer message (decline/cancel/refund) — always to customer ─────
     if (type === 'customer_message') {
       if (!phone || !customMessage) return res.status(400).json({ error: 'Phone and message required' });
       const to = formatPhone(phone);
       if (!to) return res.status(400).json({ error: 'Invalid customer phone' });
-      // Never fall back to baker's number — always go to customer
       await sendSMS(from, to, customMessage, accountSid, authToken);
       return res.status(200).json({ success: true });
     }
