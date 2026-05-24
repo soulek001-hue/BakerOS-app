@@ -1,5 +1,5 @@
 // api/storefront.js — public endpoint, no auth required
-// GET: returns baker's public storefront data including albums
+// GET: returns baker's public storefront data
 // POST: receives customer messages and writes to baker_messages table
 
 import { createClient } from '@supabase/supabase-js';
@@ -22,22 +22,22 @@ export default async function handler(req, res) {
     if (!name || !body) return res.status(400).json({ error: 'Name and message required' });
     if (!bakerSlug) return res.status(400).json({ error: 'Missing baker slug' });
 
-    // Look up baker user_id from slug
-    let bakerData = null;
+    // Look up baker user_id from slug via baker_settings
+    let bakerUserId = null;
     const { data: byUsername } = await supabaseAdmin
-      .from('baker_data').select('user_id').eq('bakery_username', bakerSlug).single();
-    bakerData = byUsername;
+      .from('baker_settings').select('user_id').eq('bakery_username', bakerSlug).single();
+    if (byUsername) bakerUserId = byUsername.user_id;
 
-    if (!bakerData) {
+    if (!bakerUserId) {
       const { data: bySlug } = await supabaseAdmin
-        .from('baker_data').select('user_id').eq('store_name_slug', bakerSlug).single();
-      bakerData = bySlug;
+        .from('baker_settings').select('user_id').eq('store_name_slug', bakerSlug).single();
+      if (bySlug) bakerUserId = bySlug.user_id;
     }
 
-    if (!bakerData?.user_id) return res.status(404).json({ error: 'Baker not found' });
+    if (!bakerUserId) return res.status(404).json({ error: 'Baker not found' });
 
     const { error } = await supabaseAdmin.from('baker_messages').insert({
-      baker_id:       bakerData.user_id,
+      baker_id:       bakerUserId,
       customer_name:  name.trim(),
       customer_phone: phone || null,
       customer_email: email || null,
@@ -61,56 +61,57 @@ export default async function handler(req, res) {
   const { slug } = req.query;
   if (!slug) return res.status(400).json({ error: 'Missing slug' });
 
+  // Query baker_settings table (replaces old baker_data)
   let { data } = await supabaseAdmin
-    .from('baker_data').select('payload').eq('bakery_username', slug).single();
+    .from('baker_settings')
+    .select('brand, baker_info, social_links, products, categories, photos, albums')
+    .eq('bakery_username', slug)
+    .single();
 
   if (!data) {
     ({ data } = await supabaseAdmin
-      .from('baker_data').select('payload').eq('store_name_slug', slug).single());
+      .from('baker_settings')
+      .select('brand, baker_info, social_links, products, categories, photos, albums')
+      .eq('store_name_slug', slug)
+      .single());
   }
 
   if (!data) return res.status(404).json({ error: 'Bakery not found' });
 
-  const p = data.payload;
+  const bi = data.baker_info || {};
 
   // SECURITY: Only expose safe public fields — never email, phone, address
   const safeInfo = {
-    name:           p.bakerInfo?.name           || '',
-    city:           p.bakerInfo?.city           || '',
-    state:          p.bakerInfo?.state          || '',
-    bio:            p.bakerInfo?.bio            || '',
-    tagline:        p.bakerInfo?.tagline        || '',
-    minOrder:       p.bakerInfo?.minOrder       || '',
-    leadTime:       p.bakerInfo?.leadTime       || '',
-    deposit:        p.bakerInfo?.deposit        || '',
-    flavors:        p.bakerInfo?.flavors        || [],
-    signatureItems: p.bakerInfo?.signatureItems || '',
-    username:       p.bakerInfo?.username       || '',
-    phone:          p.bakerInfo?.phone          || '', // for SMS notify routing
+    name:           bi.name           || '',
+    city:           bi.city           || '',
+    state:          bi.state          || '',
+    bio:            bi.bio            || '',
+    tagline:        bi.tagline        || '',
+    minOrder:       bi.minOrder       || '',
+    leadTime:       bi.leadTime       || '',
+    deposit:        bi.deposit        || '',
+    flavors:        bi.flavors        || [],
+    signatureItems: bi.signatureItems || '',
+    username:       bi.username       || '',
+    phone:          bi.phone          || '', // for SMS notify routing only
   };
 
-  // Filter photos — only return cloud URLs (not base64), strip any PII
-  const safePhotos = (p.photos || [])
+  // Filter photos — only cloud URLs, no base64
+  const safePhotos = (data.photos || [])
     .filter(ph => ph.url && ph.url.startsWith('http'))
     .map(ph => ({
-      id:         ph.id,
-      url:        ph.url,
-      type:       ph.type || 'photo',
-      mimeType:   ph.mimeType || '',
-      title:      ph.title || '',
-      caption:    ph.caption || '',
-      albumId:    ph.albumId || '',
-      productIds: ph.productIds || [],
-      date:       ph.date || '',
+      id: ph.id, url: ph.url, type: ph.type || 'photo',
+      title: ph.title || '', caption: ph.caption || '',
+      albumId: ph.albumId || '', productIds: ph.productIds || [],
     }));
 
   return res.status(200).json({
-    brand:       p.brand       || {},
+    brand:       data.brand       || {},
     bakerInfo:   safeInfo,
-    products:    (p.products   || []).filter(prod => prod.active !== false),
-    categories:  p.categories  || [],
+    products:    (data.products   || []).filter(p => p.active !== false),
+    categories:  data.categories  || [],
     photos:      safePhotos,
-    albums:      p.albums      || [],
-    socialLinks: p.socialLinks || {},
+    albums:      data.albums      || [],
+    socialLinks: data.social_links || {},
   });
 }
