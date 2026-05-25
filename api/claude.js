@@ -1,38 +1,88 @@
-// api/claude.js — BakerOS AI endpoint powered by Anthropic Claude
+import Anthropic from '@anthropic-ai/sdk';
+import { createClient } from '@supabase/supabase-js';
+
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+const supabase = createClient(
+  process.env.VITE_SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
+
+// Features that require Pro or Elite — enforced server-side
+const PRO_FEATURES  = ['ai_campaigns', 'marketing_sms', 'marketing_email'];
+const ELITE_FEATURES = ['receipt_scan'];
+const TIER_ORDER = ['starter', 'growth', 'pro', 'elite'];
+function tierAtLeast(tier, min) {
+  return TIER_ORDER.indexOf(tier) >= TIER_ORDER.indexOf(min);
+}
+
+// Simple in-memory rate limiter — max 20 Claude calls per user per minute
+const rateLimitMap = new Map();
+function checkRateLimit(userId) {
+  const now = Date.now();
+  const entry = rateLimitMap.get(userId) || { count: 0, resetAt: now + 60000 };
+  if (now > entry.resetAt) { entry.count = 0; entry.resetAt = now + 60000; }
+  entry.count++;
+  rateLimitMap.set(userId, entry);
+  return entry.count <= 20;
+}
 
 export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { messages, system, max_tokens = 1000 } = req.body;
+  // ── Server-side tier enforcement ─────────────────────────────────────────
+  const feature  = req.body?.feature || req.query?.feature || null;
+  const userId   = req.body?.userId  || req.query?.userId  || null;
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
+  if (feature && userId) {
+    try {
+      // Rate limit check
+      if (!checkRateLimit(userId)) {
+        return res.status(429).json({ error: 'Too many requests — slow down and try again' });
+      }
 
+      // Verify tier from Supabase (never trust the client)
+      const { data: settings } = await supabase
+        .from('baker_settings')
+        .select('tier')
+        .eq('user_id', userId)
+        .single();
+
+      const tier = settings?.tier || 'starter';
+
+      if (ELITE_FEATURES.includes(feature) && !tierAtLeast(tier, 'elite')) {
+        return res.status(403).json({ error: 'Elite plan required for this feature' });
+      }
+      if (PRO_FEATURES.includes(feature) && !tierAtLeast(tier, 'pro')) {
+        return res.status(403).json({ error: 'Pro plan required for this feature' });
+      }
+    } catch (err) {
+      console.error('[claude.js] Tier check failed:', err.message);
+      // Fail open only for non-sensitive features — fail closed for Pro/Elite
+      if (feature && (PRO_FEATURES.includes(feature) || ELITE_FEATURES.includes(feature))) {
+        return res.status(403).json({ error: 'Could not verify plan — please try again' });
+      }
+    }
+  }
+
+  // ── Claude API call ───────────────────────────────────────────────────────
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens,
-        system,
-        messages,
-      }),
+    const { model, max_tokens, messages, system } = req.body;
+
+    const response = await anthropic.messages.create({
+      model:      model      || 'claude-sonnet-4-20250514',
+      max_tokens: max_tokens || 1000,
+      system:     system,
+      messages:   messages,
     });
 
-    const data = await response.json();
-    console.log('Anthropic response status:', response.status);
-    if (!response.ok) {
-      console.error('Anthropic error:', JSON.stringify(data));
-      return res.status(500).json({ error: data.error?.message || 'Anthropic API error' });
-    }
-    return res.status(200).json(data);
-  } catch (e) {
-    console.error('Claude fetch error:', e.message);
-    return res.status(500).json({ error: e.message });
+    return res.status(200).json(response);
+  } catch (err) {
+    console.error('[claude.js] Anthropic error:', err.message);
+    return res.status(500).json({ error: err.message });
   }
 }
