@@ -1,133 +1,98 @@
-// api/notify.js — BakerOS SMS notification endpoint
-// type "order"            → SMS to baker (looked up server-side from baker_settings)
-// type "message"          → SMS to baker (bakerPhone passed from public storefront)
-// type "campaign"         → SMS to individual opted-in customer
-// type "customer_message" → SMS to customer (decline/cancel/refund)
-
+import twilio from 'twilio';
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseAdmin = createClient(
-  process.env.VITE_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
-);
+const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+const supabase = createClient(process.env.VITE_SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
-const rateLimitStore = new Map();
-function isRateLimited(ip) {
+// ── Security: shared secret check ─────────────────────────────────────────
+const API_SECRET = process.env.BAKEROS_API_SECRET;
+
+// ── Rate limiting ──────────────────────────────────────────────────────────
+const rateLimitMap = new Map();
+function checkRateLimit(key, max = 10, windowMs = 60000) {
   const now = Date.now();
-  const windowMs = 60 * 1000;
-  const maxRequests = 5;
-  if (!rateLimitStore.has(ip)) { rateLimitStore.set(ip, { count: 1, resetAt: now + windowMs }); return false; }
-  const record = rateLimitStore.get(ip);
-  if (now > record.resetAt) { rateLimitStore.set(ip, { count: 1, resetAt: now + windowMs }); return false; }
-  record.count++;
-  return record.count > maxRequests;
-}
-
-let cleanupCounter = 0;
-function maybeCleanup() {
-  if (++cleanupCounter < 100) return;
-  cleanupCounter = 0;
-  const now = Date.now();
-  for (const [ip, record] of rateLimitStore.entries()) {
-    if (now > record.resetAt) rateLimitStore.delete(ip);
-  }
-}
-
-function formatPhone(phone) {
-  if (!phone) return null;
-  const digits = phone.replace(/\D/g, '');
-  if (digits.length === 10) return '+1' + digits;
-  if (digits.length === 11 && digits[0] === '1') return '+' + digits;
-  return '+' + digits;
-}
-
-async function sendSMS(from, to, body, accountSid, authToken) {
-  const response = await fetch(
-    `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Basic ' + btoa(`${accountSid}:${authToken}`),
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({ From: from, To: to, Body: body }),
-    }
-  );
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.message || 'Twilio error');
-  return data;
+  const entry = rateLimitMap.get(key) || { count: 0, resetAt: now + windowMs };
+  if (now > entry.resetAt) { entry.count = 0; entry.resetAt = now + windowMs; }
+  entry.count++;
+  rateLimitMap.set(key, entry);
+  return entry.count <= max;
 }
 
 export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', 'https://app.bakeros.app');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-bakeros-secret');
+  if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 'unknown';
-  maybeCleanup();
-  if (isRateLimited(ip)) return res.status(429).json({ error: 'Too many requests' });
-
-  const accountSid = process.env.TWILIO_ACCOUNT_SID;
-  const authToken  = process.env.TWILIO_AUTH_TOKEN;
-  const from       = process.env.TWILIO_FROM_NUMBER;
-
-  if (!accountSid || !authToken || !from) {
-    return res.status(500).json({ error: 'Twilio credentials not configured' });
+  // ── Auth check — only allow requests from BakerOS app ──────────────────
+  if (API_SECRET && req.headers['x-bakeros-secret'] !== API_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  const { type, customerName, item, amount, phone, customMessage, bakerPhone, bakerId } = req.body;
-
-  if (!customerName || typeof customerName !== 'string') {
-    return res.status(400).json({ error: 'Invalid request' });
+  // ── Rate limit per baker ────────────────────────────────────────────────
+  const { type, bakerId, customerName, item, amount, phone } = req.body;
+  const rateLimitKey = `notify:${bakerId || 'anon'}`;
+  if (!checkRateLimit(rateLimitKey, 30, 60000)) {
+    return res.status(429).json({ error: 'Rate limit exceeded' });
   }
 
   try {
-    // ── Baker notification (order or storefront message) ──────────────────
-    if (type === 'order' || type === 'message') {
-      let bakerTo = null;
+    let toNumber = null;
 
-      // Look up baker phone from baker_settings (more secure than client-sent)
-      if (bakerId) {
-        const { data } = await supabaseAdmin
-          .from('baker_settings')
-          .select('baker_info')
-          .eq('user_id', bakerId)
-          .single();
-        bakerTo = formatPhone(data?.baker_info?.phone);
+    // ── For baker notifications — look up baker's phone server-side ───────
+    if (['order', 'message'].includes(type) && bakerId) {
+      const { data: settings } = await supabase
+        .from('baker_settings')
+        .select('baker_info')
+        .eq('user_id', bakerId)
+        .single();
+      const bakerPhone = settings?.baker_info?.phone;
+      if (!bakerPhone) {
+        console.warn(`[notify] No phone for baker ${bakerId}`);
+        return res.status(200).json({ ok: true, skipped: 'no baker phone' });
       }
-
-      if (!bakerTo && bakerPhone) bakerTo = formatPhone(bakerPhone);
-      if (!bakerTo) bakerTo = process.env.TWILIO_TO_NUMBER;
-      if (!bakerTo) return res.status(400).json({ error: 'No baker phone configured' });
-
-      const message = type === 'message'
-        ? `New BakerOS Message!\nFrom: ${customerName}${phone ? `\nPhone: ${phone}` : ''}\nSubject: ${item?.replace('Message: ', '') || 'Storefront inquiry'}`
-        : `New BakerOS Order!\nCustomer: ${customerName}\nItem: ${item}\nAmount: $${amount}${phone ? `\nPhone: ${phone}` : ''}`;
-
-      await sendSMS(from, bakerTo, message, accountSid, authToken);
-      return res.status(200).json({ success: true });
+      toNumber = bakerPhone.replace(/\D/g, '');
+      if (!toNumber.startsWith('1')) toNumber = '1' + toNumber;
+      toNumber = '+' + toNumber;
     }
 
-    // ── Campaign SMS to opted-in customer ────────────────────────────────
-    if (type === 'campaign') {
-      if (!phone || !customMessage) return res.status(400).json({ error: 'Phone and message required' });
-      const to = formatPhone(phone);
-      if (!to) return res.status(400).json({ error: 'Invalid customer phone' });
-      await sendSMS(from, to, customMessage, accountSid, authToken);
-      return res.status(200).json({ success: true });
+    // ── For customer messages — use provided phone ────────────────────────
+    if (['customer_message', 'campaign'].includes(type) && phone) {
+      toNumber = phone.startsWith('+') ? phone : '+1' + phone.replace(/\D/g, '');
     }
 
-    // ── Customer message (decline/cancel/refund) — always to customer ─────
-    if (type === 'customer_message') {
-      if (!phone || !customMessage) return res.status(400).json({ error: 'Phone and message required' });
-      const to = formatPhone(phone);
-      if (!to) return res.status(400).json({ error: 'Invalid customer phone' });
-      await sendSMS(from, to, customMessage, accountSid, authToken);
-      return res.status(200).json({ success: true });
+    if (!toNumber) return res.status(200).json({ ok: true, skipped: 'no phone resolved' });
+
+    let body = '';
+    switch (type) {
+      case 'order':
+        body = `🎂 New BakerOS order! ${customerName} ordered ${item} ($${amount}). Check your BakerOS dashboard.`;
+        break;
+      case 'message':
+        body = `💬 New message from ${customerName} on your BakerOS storefront. Open your app to reply.`;
+        break;
+      case 'customer_message':
+        body = req.body.message || '';
+        break;
+      case 'campaign':
+        body = req.body.message || '';
+        break;
+      default:
+        return res.status(400).json({ error: 'Unknown notification type' });
     }
 
-    return res.status(400).json({ error: 'Unknown notification type' });
+    if (!body) return res.status(400).json({ error: 'Empty message body' });
 
-  } catch (e) {
-    console.error('Notify error:', e.message);
-    return res.status(500).json({ error: e.message });
+    await client.messages.create({
+      body,
+      from: process.env.TWILIO_FROM_NUMBER,
+      to: toNumber,
+    });
+
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error('[notify] Twilio error:', err.message);
+    return res.status(500).json({ error: err.message });
   }
 }
