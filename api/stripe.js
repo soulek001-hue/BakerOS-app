@@ -220,3 +220,8 @@ async function getRawBody(req) {
     req.on('error', reject);
   });
 }
+
+// ── Security: CORS restricted to BakerOS app only ─────────────────────────
+// Note: already handled in handler — this is a reminder that stripe.js
+// should be called only from app.bakeros.app for checkout/portal actions.
+// The webhook endpoint is called by Stripe directly (no origin check needed there).
