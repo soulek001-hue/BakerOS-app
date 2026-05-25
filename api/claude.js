@@ -8,10 +8,11 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// Features that require Pro or Elite — enforced server-side
-const PRO_FEATURES  = ['ai_campaigns', 'marketing_sms', 'marketing_email'];
+// Features gated by tier
+const PRO_FEATURES   = ['ai_campaigns', 'marketing_sms', 'marketing_email'];
 const ELITE_FEATURES = ['receipt_scan'];
-const TIER_ORDER = ['starter', 'growth', 'pro', 'elite'];
+const TIER_ORDER     = ['starter', 'growth', 'pro', 'elite'];
+
 function tierAtLeast(tier, min) {
   return TIER_ORDER.indexOf(tier) >= TIER_ORDER.indexOf(min);
 }
@@ -19,7 +20,16 @@ function tierAtLeast(tier, min) {
 // Extend Vercel function timeout — receipt scanning can take 15-20 seconds
 export const maxDuration = 30;
 
-// Simple in-memory rate limiter — max 20 Claude calls per user per minute
+// Explicit body parsing config for Vercel
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: '10mb', // receipt images can be large
+    },
+  },
+};
+
+// Rate limiter — max 20 calls per user per minute
 const rateLimitMap = new Map();
 function checkRateLimit(userId) {
   const now = Date.now();
@@ -37,18 +47,22 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  // ── Server-side tier enforcement ─────────────────────────────────────────
-  const feature  = req.body?.feature || req.query?.feature || null;
-  const userId   = req.body?.userId  || req.query?.userId  || null;
+  // ── Parse body safely ──────────────────────────────────────────────────────
+  let body = req.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch { return res.status(400).json({ error: 'Invalid JSON body' }); }
+  }
+  if (!body) return res.status(400).json({ error: 'Empty request body' });
 
+  const { feature, userId, model, max_tokens, messages, system } = body;
+
+  // ── Server-side tier enforcement ───────────────────────────────────────────
   if (feature && userId) {
     try {
-      // Rate limit check
       if (!checkRateLimit(userId)) {
         return res.status(429).json({ error: 'Too many requests — slow down and try again' });
       }
 
-      // Verify tier from Supabase (never trust the client)
       const { data: settings } = await supabase
         .from('baker_settings')
         .select('tier')
@@ -64,28 +78,32 @@ export default async function handler(req, res) {
         return res.status(403).json({ error: 'Pro plan required for this feature' });
       }
     } catch (err) {
-      console.error('[claude.js] Tier check failed:', err.message);
-      // GateWall in the frontend already blocks non-eligible users
-      // If Supabase lookup fails, log it but allow the request through
-      // to avoid blocking legitimate Elite/Pro bakers due to DB issues
-      console.warn('[claude.js] Falling through on tier check error');
+      // GateWall in frontend already blocks non-eligible users
+      // If Supabase lookup fails, log and allow through
+      console.warn('[claude.js] Tier check error — allowing through:', err.message);
     }
   }
 
-  // ── Claude API call ───────────────────────────────────────────────────────
+  // ── Claude API call ────────────────────────────────────────────────────────
   try {
-    const { model, max_tokens, messages, system } = req.body;
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: 'messages array is required' });
+    }
 
     const response = await anthropic.messages.create({
-      model:      model      || 'claude-sonnet-4-20250514',
+      model:      model      || 'claude-sonnet-4-5',
       max_tokens: max_tokens || 1000,
-      system:     system,
-      messages:   messages,
+      ...(system ? { system } : {}),
+      messages,
     });
 
     return res.status(200).json(response);
   } catch (err) {
-    console.error('[claude.js] Anthropic error:', err.message);
-    return res.status(500).json({ error: err.message });
+    console.error('[claude.js] Anthropic error:', err.message, err.status, err.error);
+    return res.status(500).json({
+      error: err.message || 'Claude API error',
+      status: err.status,
+      details: err.error,
+    });
   }
 }
