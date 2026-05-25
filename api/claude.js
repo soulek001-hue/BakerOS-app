@@ -16,6 +16,9 @@ function tierAtLeast(tier, min) {
   return TIER_ORDER.indexOf(tier) >= TIER_ORDER.indexOf(min);
 }
 
+// Extend Vercel function timeout — receipt scanning can take 15-20 seconds
+export const maxDuration = 30;
+
 // Simple in-memory rate limiter — max 20 Claude calls per user per minute
 const rateLimitMap = new Map();
 function checkRateLimit(userId) {
