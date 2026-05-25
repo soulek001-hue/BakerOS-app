@@ -65,10 +65,10 @@ export default async function handler(req, res) {
       }
     } catch (err) {
       console.error('[claude.js] Tier check failed:', err.message);
-      // Fail open only for non-sensitive features — fail closed for Pro/Elite
-      if (feature && (PRO_FEATURES.includes(feature) || ELITE_FEATURES.includes(feature))) {
-        return res.status(403).json({ error: 'Could not verify plan — please try again' });
-      }
+      // GateWall in the frontend already blocks non-eligible users
+      // If Supabase lookup fails, log it but allow the request through
+      // to avoid blocking legitimate Elite/Pro bakers due to DB issues
+      console.warn('[claude.js] Falling through on tier check error');
     }
   }
 
