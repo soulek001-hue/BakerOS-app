@@ -1,6 +1,13 @@
 import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
 
+// Required for Stripe webhook signature verification
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const supabase = createClient(
   process.env.VITE_SUPABASE_URL,
@@ -164,8 +171,22 @@ export default async function handler(req, res) {
         // Subscription cancelled or payment failed — downgrade to starter
         case 'customer.subscription.deleted':
         case 'invoice.payment_failed': {
-          const obj     = event.data.object;
-          const bakerId = obj.metadata?.baker_id;
+          const obj = event.data.object;
+          let bakerId = obj.metadata?.baker_id;
+
+          // Fallback: look up baker by stripe_customer_id if metadata missing
+          if (!bakerId) {
+            const customerId = obj.customer || obj.subscription?.customer;
+            if (customerId) {
+              const { data } = await supabase
+                .from('baker_settings')
+                .select('user_id')
+                .eq('stripe_customer_id', customerId)
+                .single();
+              bakerId = data?.user_id;
+            }
+          }
+
           if (bakerId) {
             await supabase
               .from('baker_settings')
