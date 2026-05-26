@@ -1,6 +1,7 @@
 {
   "rewrites": [
     { "source": "/store/:slug", "destination": "/" },
+    { "source": "/nfc/:slug",   "destination": "/" },
     { "source": "/api/:path*",  "destination": "/api/:path*" }
   ]
 }
