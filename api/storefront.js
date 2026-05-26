@@ -112,7 +112,7 @@ export default async function handler(req, res) {
             .eq('id', existing.id);
         } else {
           // Create new customer with NFC source
-          await supabase.from('baker_customers').insert({
+          const insertData = {
             baker_id:   bakerId,
             name:       customerName,
             phone:      cleanPhone,
@@ -121,13 +121,24 @@ export default async function handler(req, res) {
             spent:      0,
             last:       new Date().toISOString().split('T')[0],
             tag:        'NFC Lead',
-            tags:       ['NFC Lead'],
             notes:      'Captured via NFC tag',
             sms_opt_in: true,
             allergies:  '',
-            source:     'nfc',
-            is_new_nfc: true, // used for badge notification
-          });
+          };
+          // Add optional columns if they exist in schema
+          try { insertData.source = 'nfc'; } catch {}
+          try { insertData.tags = ['NFC Lead']; } catch {}
+          try { insertData.is_new_nfc = true; } catch {}
+
+          const { error: insertError } = await supabase.from('baker_customers').insert(insertData);
+          if (insertError) {
+            console.error('[storefront NFC insert]', insertError.message);
+            // Try without optional columns if insert failed
+            delete insertData.source;
+            delete insertData.tags;
+            delete insertData.is_new_nfc;
+            await supabase.from('baker_customers').insert(insertData);
+          }
         }
 
         return res.status(200).json({ ok: true });
