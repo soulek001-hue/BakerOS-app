@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { randomUUID } from 'crypto';
 
 const supabase = createClient(
   process.env.VITE_SUPABASE_URL,
@@ -113,6 +114,7 @@ export default async function handler(req, res) {
         } else {
           // Create new customer with NFC source
           const insertData = {
+            id:         randomUUID(),
             baker_id:   bakerId,
             name:       customerName,
             phone:      cleanPhone,
