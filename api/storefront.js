@@ -1,10 +1,14 @@
 import { createClient } from '@supabase/supabase-js';
 import { randomUUID } from 'crypto';
 
-const supabase = createClient(
-  process.env.VITE_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
-);
+// ── Validate env vars at startup so failures are obvious in logs ─────────────
+const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
+
+if (!SUPABASE_URL) console.error('[storefront] MISSING env var: VITE_SUPABASE_URL');
+if (!SUPABASE_KEY) console.error('[storefront] MISSING env var: SUPABASE_SERVICE_KEY');
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // Rate limiting for POST requests
 const rateLimitMap = new Map();
@@ -23,29 +27,36 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
+  // Fail fast if env vars are missing — makes the problem visible immediately
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    console.error('[storefront] Aborting — Supabase env vars not configured');
+    return res.status(500).json({ error: 'Server configuration error' });
+  }
+
   // ── GET: Return baker's public storefront data ────────────────────────────
   if (req.method === 'GET') {
     const { slug } = req.query;
     if (!slug) return res.status(400).json({ error: 'slug required' });
 
     try {
-      // Look up by generated slug column
-      const { data: settings } = await supabase
+      const { data: settings, error: fetchError } = await supabase
         .from('baker_settings')
         .select('user_id, brand, baker_info, products, categories, photos, albums, social_links, tier')
         .eq('store_name_slug', slug)
         .single();
 
+      if (fetchError) {
+        console.error('[storefront GET] Supabase error:', fetchError.message);
+        return res.status(500).json({ error: 'Database error' });
+      }
       if (!settings) return res.status(404).json({ error: 'Bakery not found' });
 
-      // Filter to only active products — never expose PII
       const activeProducts = (settings.products || []).filter(p => p.active !== false);
 
       return res.status(200).json({
         bakerId:     settings.user_id,
         brand:       settings.brand || {},
         bakerInfo:   {
-          // Only expose non-PII fields
           bio:            settings.baker_info?.bio,
           minOrder:       settings.baker_info?.minOrder,
           leadTime:       settings.baker_info?.leadTime,
@@ -62,7 +73,7 @@ export default async function handler(req, res) {
         tier:        settings.tier || 'starter',
       });
     } catch (err) {
-      console.error('[storefront GET]', err.message);
+      console.error('[storefront GET] Unexpected error:', err.message);
       return res.status(500).json({ error: 'Server error' });
     }
   }
@@ -87,32 +98,45 @@ export default async function handler(req, res) {
       }
 
       const cleanPhone = customerPhone.replace(/\D/g, '');
+      console.log(`[storefront NFC] Saving lead for bakerId=${bakerId} phone=${cleanPhone}`);
 
       try {
-        // Check if customer already exists (by phone) to avoid duplicates
-        const { data: existing } = await supabase
+        // Check for duplicate by phone
+        const { data: existing, error: lookupError } = await supabase
           .from('baker_customers')
-          .select('id, orders, spent, tags')
+          .select('id, tags')
           .eq('baker_id', bakerId)
           .eq('phone', cleanPhone)
-          .single();
+          .maybeSingle();  // maybeSingle() returns null instead of error when no row found
+
+        if (lookupError) {
+          console.error('[storefront NFC] Lookup error:', lookupError.message);
+          // Don't abort — try insert anyway
+        }
 
         if (existing) {
           // Update existing customer — add NFC tag if not already there
-          const tags = existing.tags || [];
+          const tags = Array.isArray(existing.tags) ? existing.tags : [];
           if (!tags.includes('NFC Lead')) tags.push('NFC Lead');
-          await supabase
+
+          const { error: updateError } = await supabase
             .from('baker_customers')
             .update({
               name:       customerName,
-              email:      customerEmail || existing.email || '',
+              email:      customerEmail || '',
               tags,
+              source:     'nfc',
               sms_opt_in: true,
+              is_new_nfc: true,
               last:       new Date().toISOString().split('T')[0],
             })
             .eq('id', existing.id);
+
+          if (updateError) console.error('[storefront NFC] Update error:', updateError.message);
+          else console.log('[storefront NFC] Updated existing customer:', existing.id);
+
         } else {
-          // Create new customer with NFC source
+          // Insert new customer
           const insertData = {
             id:         randomUUID(),
             baker_id:   bakerId,
@@ -123,29 +147,29 @@ export default async function handler(req, res) {
             spent:      0,
             last:       new Date().toISOString().split('T')[0],
             tag:        'NFC Lead',
+            tags:       ['NFC Lead'],
             notes:      'Captured via NFC tag',
             sms_opt_in: true,
             allergies:  '',
+            source:     'nfc',
+            is_new_nfc: true,
           };
-          // Add optional columns if they exist in schema
-          try { insertData.source = 'nfc'; } catch {}
-          try { insertData.tags = ['NFC Lead']; } catch {}
-          try { insertData.is_new_nfc = true; } catch {}
 
-          const { error: insertError } = await supabase.from('baker_customers').insert(insertData);
+          const { error: insertError } = await supabase
+            .from('baker_customers')
+            .insert(insertData);
+
           if (insertError) {
-            console.error('[storefront NFC insert]', insertError.message);
-            // Try without optional columns if insert failed
-            delete insertData.source;
-            delete insertData.tags;
-            delete insertData.is_new_nfc;
-            await supabase.from('baker_customers').insert(insertData);
+            console.error('[storefront NFC] Insert error:', insertError.message, insertError.details, insertError.hint);
+            return res.status(500).json({ error: 'Could not save lead: ' + insertError.message });
           }
+
+          console.log('[storefront NFC] Inserted new customer:', insertData.id);
         }
 
         return res.status(200).json({ ok: true });
       } catch (err) {
-        console.error('[storefront NFC lead]', err.message);
+        console.error('[storefront NFC lead] Unexpected error:', err.message);
         return res.status(500).json({ error: 'Could not save lead' });
       }
     }
@@ -159,7 +183,7 @@ export default async function handler(req, res) {
       }
 
       try {
-        await supabase.from('baker_messages').insert({
+        const { error: msgError } = await supabase.from('baker_messages').insert({
           baker_id:       bakerId,
           customer_name:  customerName,
           customer_phone: customerPhone || '',
@@ -171,9 +195,14 @@ export default async function handler(req, res) {
           archived:       false,
         });
 
+        if (msgError) {
+          console.error('[storefront message] Insert error:', msgError.message);
+          return res.status(500).json({ error: 'Could not save message' });
+        }
+
         return res.status(200).json({ ok: true });
       } catch (err) {
-        console.error('[storefront message]', err.message);
+        console.error('[storefront message] Unexpected error:', err.message);
         return res.status(500).json({ error: 'Could not save message' });
       }
     }
