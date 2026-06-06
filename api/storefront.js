@@ -33,9 +33,54 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'Server configuration error' });
   }
 
-  // ── GET: Return baker's public storefront data ────────────────────────────
+  // ── GET: Return baker's public storefront data or invoice data ───────────
   if (req.method === 'GET') {
-    const { slug } = req.query;
+    const { slug, invoice: invoiceId } = req.query;
+
+    // ── Invoice lookup ────────────────────────────────────────────────────
+    if (invoiceId) {
+      try {
+        // Find the invoice
+        const { data: inv, error: invError } = await supabase
+          .from('baker_invoices')
+          .select('*')
+          .eq('id', invoiceId.toUpperCase())
+          .single();
+
+        if (invError || !inv) {
+          return res.status(404).json({ error: 'Invoice not found' });
+        }
+
+        // Get baker's brand + pay handles
+        const { data: settings } = await supabase
+          .from('baker_settings')
+          .select('brand, pay_handles')
+          .eq('user_id', inv.baker_id)
+          .single();
+
+        return res.status(200).json({
+          invoice: {
+            id:           inv.id,
+            customer:     inv.customer,
+            amount:       parseFloat(inv.amount) || 0,
+            status:       inv.status,
+            due:          inv.due,
+            items:        inv.items || 'Custom order',
+            finalImageURL: inv.final_image_url || null,
+          },
+          baker: {
+            storeName: settings?.brand?.storeName || 'Your Baker',
+            logo:      settings?.brand?.logo || null,
+            theme:     settings?.brand?.theme || { primary: '#C47B00' },
+          },
+          payHandles: settings?.pay_handles || {},
+        });
+      } catch (err) {
+        console.error('[storefront invoice GET]', err.message);
+        return res.status(500).json({ error: 'Server error' });
+      }
+    }
+
     if (!slug) return res.status(400).json({ error: 'slug required' });
 
     try {
