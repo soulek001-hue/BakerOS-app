@@ -134,6 +134,33 @@ export default async function handler(req, res) {
 
     if (!bakerId) return res.status(400).json({ error: 'bakerId required' });
 
+    // ── Mark Invoice Paid ─────────────────────────────────────────────────
+    if (type === 'mark_paid') {
+      const { invoiceId } = req.body;
+      if (!invoiceId) return res.status(400).json({ error: 'invoiceId required' });
+
+      try {
+        const { data: inv } = await supabase
+          .from('baker_invoices')
+          .select('baker_id, customer, amount')
+          .eq('id', invoiceId.toUpperCase())
+          .single();
+
+        if (!inv) return res.status(404).json({ error: 'Invoice not found' });
+
+        await supabase
+          .from('baker_invoices')
+          .update({ status: 'paid', updated_at: new Date().toISOString() })
+          .eq('id', invoiceId.toUpperCase());
+
+        console.log(`[storefront] Invoice ${invoiceId} marked paid by customer`);
+        return res.status(200).json({ ok: true });
+      } catch (err) {
+        console.error('[storefront mark_paid]', err.message);
+        return res.status(500).json({ error: 'Could not update invoice' });
+      }
+    }
+
     // ── NFC Lead Capture ───────────────────────────────────────────────────
     if (type === 'nfc_lead') {
       const { customerName, customerPhone, customerEmail } = req.body;
