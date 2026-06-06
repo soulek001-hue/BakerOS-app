@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { createClient } from '@supabase/supabase-js';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const API_SECRET = process.env.BAKEROS_API_SECRET;
 
 const supabase = createClient(
   process.env.VITE_SUPABASE_URL,
@@ -46,6 +47,11 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+  // ── Shared secret check — blocks unauthenticated callers ──────────────────
+  if (API_SECRET && req.headers['x-bakeros-secret'] !== API_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
 
   // ── Parse body safely ──────────────────────────────────────────────────────
   let body = req.body;
