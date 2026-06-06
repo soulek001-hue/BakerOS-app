@@ -60,13 +60,15 @@ export default async function handler(req, res) {
 
         return res.status(200).json({
           invoice: {
-            id:           inv.id,
-            customer:     inv.customer,
-            amount:       parseFloat(inv.amount) || 0,
-            status:       inv.status,
-            due:          inv.due,
-            items:        inv.items || 'Custom order',
+            id:            inv.id,
+            customer:      inv.customer,
+            amount:        parseFloat(inv.amount) || 0,
+            status:        inv.status,
+            due:           inv.due,
+            items:         inv.items || 'Custom order',
             finalImageURL: inv.final_image_url || null,
+            depositAmount: parseFloat(inv.deposit_amount) || 0,
+            balance:       parseFloat(inv.balance) || 0,
           },
           baker: {
             storeName: settings?.brand?.storeName || 'Your Baker',
