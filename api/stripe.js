@@ -9,6 +9,7 @@ export const config = {
 };
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const API_SECRET = process.env.BAKEROS_API_SECRET;
 const supabase = createClient(
   process.env.VITE_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
@@ -37,6 +38,11 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const { action } = req.query;
+
+  // ── Shared secret check — blocks unauthenticated callers on non-webhook actions
+  if (action !== 'webhook' && API_SECRET && req.headers['x-bakeros-secret'] !== API_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
 
   // ── CREATE CHECKOUT SESSION ─────────────────────────────────────────────
   if (action === 'create-checkout') {
