@@ -67,8 +67,9 @@ export default async function handler(req, res) {
             due:           inv.due,
             items:         inv.items || 'Custom order',
             finalImageURL: inv.final_image_url || null,
-            depositAmount: parseFloat(inv.deposit_amount) || 0,
-            balance:       parseFloat(inv.balance) || 0,
+            depositAmount:    parseFloat(inv.deposit_amount) || 0,
+            balance:          parseFloat(inv.balance) || 0,
+            depositReceived:  inv.deposit_received || false,
           },
           baker: {
             storeName: settings?.brand?.storeName || 'Your Baker',
